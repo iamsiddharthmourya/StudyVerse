@@ -20,6 +20,7 @@ import {
   generateQuizWithGemini,
   discoverSupportedModels,
   resolveModelPlan,
+  isTextGenerationModel,
   _resetModelCacheForTesting,
 } from '../api/_lib/gemini.js';
 import { validateQuiz } from '../src/quizverse/services/quizValidation.js';
@@ -331,13 +332,34 @@ async function run() {
   }
 
   // =========================================================================
-  // Test K: Dynamic models.list Discovery & generateContent Model Selection
+  // Test K: isTextGenerationModel Helper Verification
+  // =========================================================================
+  {
+    // Text models must be accepted
+    assert.strictEqual(isTextGenerationModel('gemini-2.0-flash'), true);
+    assert.strictEqual(isTextGenerationModel('gemini-2.0-flash-lite'), true);
+    assert.strictEqual(isTextGenerationModel('gemini-1.5-flash'), true);
+    assert.strictEqual(isTextGenerationModel('gemini-1.5-pro'), true);
+
+    // Image preview, image generation, audio, and embedding models must be strictly rejected
+    assert.strictEqual(isTextGenerationModel('gemini-2.5-flash-preview-image'), false);
+    assert.strictEqual(isTextGenerationModel('models/gemini-2.5-flash-preview-image'), false);
+    assert.strictEqual(isTextGenerationModel('imagen-3.0-generate-002'), false);
+    assert.strictEqual(isTextGenerationModel('gemini-image-preview'), false);
+    assert.strictEqual(isTextGenerationModel('text-embedding-004'), false);
+    assert.strictEqual(isTextGenerationModel('models/aqa'), false);
+    assert.strictEqual(isTextGenerationModel('models/gemini-live-audio'), false);
+    console.log('  ok  Test 11: isTextGenerationModel strictly filters out image preview and non-text models');
+  }
+
+  // =========================================================================
+  // Test L: Dynamic models.list Discovery & Text Model Selection
   // =========================================================================
   {
     _resetModelCacheForTesting();
     const originalFetch = global.fetch;
 
-    // Mock Google models.list endpoint
+    // Mock Google models.list endpoint containing a mix of text, image-preview, and embedding models
     global.fetch = async (url) => {
       if (url.includes('/models?')) {
         return {
@@ -349,6 +371,16 @@ async function run() {
                 name: 'models/embedding-001',
                 displayName: 'Embedding Model',
                 supportedGenerationMethods: ['embedContent'],
+              },
+              {
+                name: 'models/gemini-2.5-flash-preview-image',
+                displayName: 'Gemini 2.5 Flash Image Preview',
+                supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
+              },
+              {
+                name: 'models/imagen-3.0-generate-002',
+                displayName: 'Imagen 3 Generative',
+                supportedGenerationMethods: ['generateContent'],
               },
               {
                 name: 'models/gemini-1.5-flash',
@@ -373,9 +405,11 @@ async function run() {
     };
 
     const discovered = await discoverSupportedModels('mock_api_key_test');
-    assert.strictEqual(discovered.length, 2, 'Only models supporting generateContent must be discovered');
+    assert.strictEqual(discovered.length, 2, 'Only text models supporting generateContent must be discovered');
     assert.ok(discovered.some((m) => m.id === 'gemini-2.0-flash'));
     assert.ok(discovered.some((m) => m.id === 'gemini-1.5-flash'));
+    assert.ok(!discovered.some((m) => m.id.includes('preview-image')), 'gemini-2.5-flash-preview-image must be excluded');
+    assert.ok(!discovered.some((m) => m.id.includes('imagen')), 'Imagen models must be excluded');
     assert.ok(!discovered.some((m) => m.id === 'embedding-001'), 'Embedding models must be excluded');
 
     // Test selection ranking: gemini-2.0-flash ranked above gemini-1.5-flash
@@ -383,18 +417,91 @@ async function run() {
     assert.strictEqual(plan[0].model, 'gemini-2.0-flash');
     assert.strictEqual(plan[0].source, 'discovered_primary');
 
+    // Test user-configured image model override rejected in favor of verified text model
+    const planWithImageOverride = await resolveModelPlan('mock_api_key_test', 'gemini-2.5-flash-preview-image');
+    assert.strictEqual(planWithImageOverride[0].model, 'gemini-2.0-flash', 'Must ignore image model override and use text model');
+
     // Test outdated/unsupported GEMINI_MODEL fallback:
-    // If user configured an outdated model not in discovered list, it must safely fall back
     const planWithInvalidOverride = await resolveModelPlan('mock_api_key_test', 'deprecated-palm-2');
     assert.strictEqual(planWithInvalidOverride[0].model, 'gemini-2.0-flash', 'Must fall back to active discovered model');
 
     // Restore
     global.fetch = originalFetch;
     _resetModelCacheForTesting();
-    console.log('  ok  Test 11: Dynamic models.list discovery verified; selects active generateContent models');
+    console.log('  ok  Test 12: Dynamic models.list excludes image-preview models and selects text models');
   }
 
-  console.log('\nAll 11 Phase 5 Gemini Backend & Quota Tests Passed Successfully!');
+  // =========================================================================
+  // Test M: HTTP 429 Rate Limit / Quota Handling (No Retry Loops)
+  // =========================================================================
+  {
+    _resetModelCacheForTesting();
+    const originalFetch = global.fetch;
+    process.env.GEMINI_API_KEY = 'mock_key_for_429_test';
+
+    let generateCallCount = 0;
+
+    global.fetch = async (url) => {
+      if (url.includes('/models?')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            models: [
+              {
+                name: 'models/gemini-2.0-flash',
+                supportedGenerationMethods: ['generateContent'],
+              },
+              {
+                name: 'models/gemini-1.5-flash',
+                supportedGenerationMethods: ['generateContent'],
+              },
+            ],
+          }),
+        };
+      }
+
+      if (url.includes(':generateContent')) {
+        generateCallCount++;
+        return {
+          ok: false,
+          status: 429,
+          json: async () => ({
+            error: {
+              code: 429,
+              message: 'Resource has been exhausted (e.g. check quota).',
+              status: 'RESOURCE_EXHAUSTED',
+            },
+          }),
+        };
+      }
+
+      return originalFetch(url);
+    };
+
+    try {
+      await generateQuizWithGemini({
+        sourceType: 'topic',
+        topic: 'Rate Limit Test',
+        questionCount: 5,
+      });
+      assert.fail('Must throw on HTTP 429');
+    } catch (err) {
+      assert.strictEqual(err.status, 429, 'Must preserve HTTP 429 status');
+      assert.strictEqual(err.code, 'GEMINI_RATE_LIMIT');
+      assert.match(err.message, /rate limit or quota/i);
+      // Ensure Google's quota is respected: only 1 generateContent attempt made, no retry loops
+      assert.strictEqual(generateCallCount, 1, 'Must NOT cycle through other models on HTTP 429');
+    }
+
+    // Restore
+    global.fetch = originalFetch;
+    delete process.env.GEMINI_API_KEY;
+    _resetModelCacheForTesting();
+    console.log('  ok  Test 13: HTTP 429 handled gracefully without bypassing Google quota');
+  }
+
+  console.log('\nAll 13 Phase 5 Gemini Backend & Quota Tests Passed Successfully!');
 }
 
 run().catch((err) => {

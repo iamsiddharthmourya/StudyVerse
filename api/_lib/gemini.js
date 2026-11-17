@@ -79,6 +79,54 @@ RESPOND STRICTLY WITH A VALID JSON OBJECT adhering to this schema:
 }
 
 /**
+ * Helper to identify whether a model is suitable for text reasoning & quiz generation.
+ * Excludes image generation, image preview, image editing, audio, speech, TTS, embeddings, and real-time models.
+ */
+export function isTextGenerationModel(modelId, displayName = '') {
+  if (!modelId || typeof modelId !== 'string') return false;
+  const cleanId = modelId.replace(/^models\//, '').toLowerCase();
+  const cleanDisplay = (displayName || '').toLowerCase();
+
+  // Exclude image generation, image editing, and image preview models
+  const imagePatterns = [
+    'image',
+    'imagen',
+    'preview-image',
+    'image-preview',
+    'visual',
+    'diffusion',
+  ];
+  for (const pat of imagePatterns) {
+    if (cleanId.includes(pat) || cleanDisplay.includes(pat)) {
+      return false;
+    }
+  }
+
+  // Exclude audio / speech / tts models
+  const audioPatterns = ['audio', 'tts', 'speech', 'voice', 'sound'];
+  for (const pat of audioPatterns) {
+    if (cleanId.includes(pat) || cleanDisplay.includes(pat)) {
+      return false;
+    }
+  }
+
+  // Exclude embedding, moderation, and specialized non-text-completion models
+  const otherNonTextPatterns = ['embedding', 'embed', 'aqa', 'realtime', 'live'];
+  for (const pat of otherNonTextPatterns) {
+    if (cleanId.includes(pat) || cleanDisplay.includes(pat)) {
+      return false;
+    }
+  }
+
+  // Must be a gemini model
+  if (!cleanId.startsWith('gemini')) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * Discover models using Google's models.list endpoint and select those that support generateContent.
  * Caches discovery results for 5 minutes to avoid redundant network calls.
  */
@@ -111,6 +159,11 @@ export async function discoverSupportedModels(apiKey) {
 
       console.log(`[Gemini Diagnostic] models.list (${ver}) returned HTTP ${response.status}`);
 
+      if (response.status === 429) {
+        console.warn(`[Gemini Diagnostic] models.list (${ver}) returned HTTP 429 (rate limit). Google quota reached.`);
+        break;
+      }
+
       if (!response.ok) {
         continue;
       }
@@ -120,12 +173,13 @@ export async function discoverSupportedModels(apiKey) {
         continue;
       }
 
-      // Filter models that explicitly support generateContent
+      // Filter models that explicitly support generateContent AND are text-generation models
       const capableModels = data.models
         .filter(
           (m) =>
             Array.isArray(m.supportedGenerationMethods) &&
-            m.supportedGenerationMethods.includes('generateContent')
+            m.supportedGenerationMethods.includes('generateContent') &&
+            isTextGenerationModel(m.name, m.displayName)
         )
         .map((m) => {
           const rawName = m.name || '';
@@ -141,7 +195,7 @@ export async function discoverSupportedModels(apiKey) {
 
       if (capableModels.length > 0) {
         console.log(
-          `[Gemini Diagnostic] Discovered ${capableModels.length} models supporting generateContent via ${ver}: ${capableModels.map((m) => m.id).join(', ')}`
+          `[Gemini Diagnostic] Discovered ${capableModels.length} text models supporting generateContent via ${ver}: ${capableModels.map((m) => m.id).join(', ')}`
         );
         discovered.push(...capableModels);
         break; // Successfully discovered with this version
@@ -168,13 +222,15 @@ export async function resolveModelPlan(apiKey, userConfiguredModel) {
   // 1. Discover models using Google's models.list endpoint
   const discovered = await discoverSupportedModels(cleanKey);
 
-  // 2. Check if user set GEMINI_MODEL and whether it explicitly supports generateContent
+  // 2. Check if user set GEMINI_MODEL and whether it explicitly supports generateContent and text reasoning
   if (userConfiguredModel) {
     const cleanUser = userConfiguredModel.replace(/^models\//, '').trim().replace(/^["']|["']$/g, '');
-    const userMatch = discovered.find((m) => m.id.toLowerCase() === cleanUser.toLowerCase());
+    const userMatch = discovered.find(
+      (m) => m.id.toLowerCase() === cleanUser.toLowerCase() && isTextGenerationModel(m.id, m.displayName)
+    );
     if (userMatch) {
       console.log(
-        `[Gemini Diagnostic] Configured GEMINI_MODEL "${cleanUser}" verified in models.list with generateContent support.`
+        `[Gemini Diagnostic] Configured GEMINI_MODEL "${cleanUser}" verified in models.list with text generateContent support.`
       );
       return [
         { model: userMatch.id, version: userMatch.version, source: 'verified_config' },
@@ -184,20 +240,25 @@ export async function resolveModelPlan(apiKey, userConfiguredModel) {
       ];
     } else if (discovered.length > 0) {
       console.warn(
-        `[Gemini Diagnostic] GEMINI_MODEL "${cleanUser}" does not support generateContent or was not found in models.list. Falling back to active discovered models.`
+        `[Gemini Diagnostic] GEMINI_MODEL "${cleanUser}" is either not a text model or was not found in models.list. Falling back to active discovered models.`
       );
     }
   }
 
-  // 3. Select best model from discovered models supporting generateContent
+  // 3. Select best model from discovered text-generation models supporting generateContent
   if (discovered.length > 0) {
     const preference = [
-      /gemini-2\.5-flash/i,
+      /^gemini-2\.0-flash$/i,
+      /^gemini-2\.0-flash-lite$/i,
+      /^gemini-1\.5-flash$/i,
+      /^gemini-1\.5-flash-8b$/i,
+      /^gemini-1\.5-pro$/i,
+      /^gemini-2\.5-flash$/i,
       /gemini-2\.0-flash/i,
       /gemini-1\.5-flash/i,
-      /gemini-1\.5-pro/i,
       /gemini-2/i,
       /flash/i,
+      /pro/i,
       /gemini/i,
     ];
 
@@ -208,7 +269,7 @@ export async function resolveModelPlan(apiKey, userConfiguredModel) {
     });
 
     console.log(
-      `[Gemini Diagnostic] Selected dynamic verified model: ${sorted[0].id} (endpoint: ${sorted[0].version})`
+      `[Gemini Diagnostic] Selected dynamic verified text model: ${sorted[0].id} (endpoint: ${sorted[0].version})`
     );
 
     return sorted.map((m, i) => ({
@@ -226,7 +287,7 @@ export async function resolveModelPlan(apiKey, userConfiguredModel) {
     { model: 'gemini-2.0-flash', version: 'v1beta', source: 'static' },
     { model: 'gemini-1.5-flash', version: 'v1', source: 'static' },
     { model: 'gemini-1.5-flash', version: 'v1beta', source: 'static' },
-    { model: 'gemini-2.5-flash', version: 'v1beta', source: 'static' },
+    { model: 'gemini-2.0-flash-lite', version: 'v1beta', source: 'static' },
     { model: 'gemini-1.5-pro', version: 'v1', source: 'static' },
   ];
 }
@@ -282,6 +343,18 @@ async function sendGeminiRequest(apiKey, model, prompt, apiVersion = 'v1beta') {
     } catch {
       errorDetail = await response.text();
     }
+
+    if (response.status === 429) {
+      console.warn(`[Gemini Diagnostic] HTTP 429 received from Google API: ${errorDetail}`);
+      const err = new Error(
+        `Gemini API rate limit or quota exceeded (HTTP 429): Google's free tier request limit reached. Please wait a moment before trying again.`
+      );
+      err.status = 429;
+      err.code = 'GEMINI_RATE_LIMIT';
+      err.detail = errorDetail;
+      throw err;
+    }
+
     const err = new Error(`Gemini API error (HTTP ${response.status}): ${errorDetail}`);
     err.status = response.status;
     throw err;
@@ -324,6 +397,12 @@ export async function generateQuizWithGemini(params) {
       }
     } catch (err) {
       lastError = err;
+      if (err.status === 429) {
+        console.warn(
+          `[Gemini Diagnostic] Rate limit (HTTP 429) on model ${item.model}. Respecting Google API quota; aborting immediately.`
+        );
+        throw err;
+      }
       if (err.status === 404 || err.status === 400) {
         console.warn(
           `[Gemini Diagnostic] Model ${item.model} (${item.version}) failed with HTTP ${err.status}. Trying next candidate...`
