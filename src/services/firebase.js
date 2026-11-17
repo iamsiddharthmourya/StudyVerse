@@ -8,7 +8,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
-const env = import.meta.env;
+const env = (typeof import.meta !== 'undefined' && import.meta.env) || {};
 
 const config = {
   apiKey: env.VITE_FIREBASE_API_KEY,

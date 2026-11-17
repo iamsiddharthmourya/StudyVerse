@@ -20,6 +20,7 @@ import LandingPage from './pages/LandingPage.jsx';
 import NotFound from './pages/NotFound.jsx';
 import QuizDashboard from './quizverse/pages/QuizDashboard.jsx';
 import QuizPlaceholder from './quizverse/pages/QuizPlaceholder.jsx';
+import { QuizProvider } from './quizverse/state/QuizContext.jsx';
 
 const PAGES = {
   dashboard: Dashboard,
@@ -218,7 +219,11 @@ function AppRoutes() {
           path="/quiz"
           element={
             <AuthGate>
-              {() => <QuizDashboard />}
+              {(user) => (
+                <QuizProvider key={`${user.mode}:${user.uid}`}>
+                  <QuizDashboard />
+                </QuizProvider>
+              )}
             </AuthGate>
           }
         />
@@ -226,7 +231,11 @@ function AppRoutes() {
           path="/quiz/create"
           element={
             <AuthGate>
-              {() => <QuizPlaceholder type="create" />}
+              {(user) => (
+                <QuizProvider key={`${user.mode}:${user.uid}`}>
+                  <QuizPlaceholder type="create" />
+                </QuizProvider>
+              )}
             </AuthGate>
           }
         />
@@ -234,7 +243,11 @@ function AppRoutes() {
           path="/quiz/play/:quizId"
           element={
             <AuthGate>
-              {() => <QuizPlaceholder type="play" />}
+              {(user) => (
+                <QuizProvider key={`${user.mode}:${user.uid}`}>
+                  <QuizPlaceholder type="play" />
+                </QuizProvider>
+              )}
             </AuthGate>
           }
         />
@@ -242,7 +255,11 @@ function AppRoutes() {
           path="/quiz/result/:attemptId"
           element={
             <AuthGate>
-              {() => <QuizPlaceholder type="result" />}
+              {(user) => (
+                <QuizProvider key={`${user.mode}:${user.uid}`}>
+                  <QuizPlaceholder type="result" />
+                </QuizProvider>
+              )}
             </AuthGate>
           }
         />
@@ -250,7 +267,11 @@ function AppRoutes() {
           path="/quiz/history"
           element={
             <AuthGate>
-              {() => <QuizPlaceholder type="history" />}
+              {(user) => (
+                <QuizProvider key={`${user.mode}:${user.uid}`}>
+                  <QuizPlaceholder type="history" />
+                </QuizProvider>
+              )}
             </AuthGate>
           }
         />

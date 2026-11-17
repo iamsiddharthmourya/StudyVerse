@@ -1,9 +1,91 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Each signed-in user can read and write only their own planner document.
+
+    // Helper functions for authentication & ownership
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // 1. Existing StudyVerse root planner document: /users/{userId}
+    // Preserves existing access for the StudyVerse study planner without changes.
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read, write: if isOwner(userId);
+
+      // 2. QuizVerse Quizzes subcollection: /users/{userId}/quizzes/{quizId}
+      match /quizzes/{quizId} {
+        // Read: Only the authenticated owner can read their own quizzes
+        allow read: if isOwner(userId);
+
+        // Delete: Only the owner can delete their own quiz
+        allow delete: if isOwner(userId);
+
+        // Create: Must be owner, enforce required schema, field types, and size boundaries
+        allow create: if isOwner(userId)
+          && isValidQuizDoc(request.resource.data);
+
+        // Update: Must be owner, enforce schema, and prevent mutating document id or createdAt
+        allow update: if isOwner(userId)
+          && isValidQuizDoc(request.resource.data)
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.createdAt == resource.data.createdAt;
+      }
+
+      // 3. QuizVerse Attempts subcollection: /users/{userId}/attempts/{attemptId}
+      match /attempts/{attemptId} {
+        // Read: Only the authenticated owner can read their own attempts
+        allow read: if isOwner(userId);
+
+        // Delete: Only the owner can delete their own attempt records
+        allow delete: if isOwner(userId);
+
+        // Create: Must be owner, enforce required attempt schema and data types
+        allow create: if isOwner(userId)
+          && isValidAttemptDoc(request.resource.data);
+
+        // Update: Attempts are immutable historical records
+        allow update: if false;
+      }
+    }
+
+    // Validation helper functions for Quizzes
+    function isValidQuizDoc(data) {
+      return data.keys().hasOnly(['id', 'title', 'description', 'sourceType', 'sourceName', 'difficulty', 'questionCount', 'questions', 'createdAt', 'updatedAt', 'status'])
+        && data.keys().hasAll(['id', 'title', 'sourceType', 'difficulty', 'questionCount', 'questions', 'createdAt'])
+        && data.id is string && data.id.size() > 0 && data.id.size() <= 100
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && (!('description' in data) || (data.description is string && data.description.size() <= 2000))
+        && data.sourceType in ['topic', 'document']
+        && (!('sourceName' in data) || (data.sourceName is string && data.sourceName.size() <= 200))
+        && data.difficulty in ['easy', 'medium', 'hard']
+        && data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 50
+        && data.questions is list && data.questions.size() == data.questionCount
+        && data.createdAt is string
+        && (!('updatedAt' in data) || data.updatedAt is string)
+        && (!('status' in data) || (data.status is string && data.status.size() <= 50));
+    }
+
+    // Validation helper functions for Attempts
+    function isValidAttemptDoc(data) {
+      return data.keys().hasOnly(['id', 'quizId', 'quizTitle', 'totalQuestions', 'correctAnswers', 'incorrectAnswers', 'unanswered', 'score', 'startedAt', 'completedAt', 'timeTaken', 'answers', 'createdAt'])
+        && data.keys().hasAll(['id', 'quizId', 'totalQuestions', 'correctAnswers', 'score', 'completedAt', 'createdAt'])
+        && data.id is string && data.id.size() > 0 && data.id.size() <= 100
+        && data.quizId is string && data.quizId.size() > 0 && data.quizId.size() <= 100
+        && (!('quizTitle' in data) || (data.quizTitle is string && data.quizTitle.size() <= 200))
+        && data.totalQuestions is int && data.totalQuestions >= 1 && data.totalQuestions <= 50
+        && data.correctAnswers is int && data.correctAnswers >= 0 && data.correctAnswers <= data.totalQuestions
+        && (!('incorrectAnswers' in data) || (data.incorrectAnswers is int && data.incorrectAnswers >= 0))
+        && (!('unanswered' in data) || (data.unanswered is int && data.unanswered >= 0))
+        && (data.score is int || data.score is float) && data.score >= 0 && data.score <= 100
+        && (!('startedAt' in data) || data.startedAt is string)
+        && data.completedAt is string
+        && (!('timeTaken' in data) || ((data.timeTaken is int || data.timeTaken is float) && data.timeTaken >= 0))
+        && (!('answers' in data) || data.answers is map)
+        && data.createdAt is string;
     }
   }
 }
