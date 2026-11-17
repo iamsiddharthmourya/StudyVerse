@@ -10,8 +10,11 @@
     "test": "node tests/logic.test.mjs"
   },
   "dependencies": {
+    "busboy": "^1.6.0",
     "firebase": "^10.14.1",
     "lucide-react": "^0.468.0",
+    "mammoth": "^1.13.0",
+    "pdf-parse": "^2.4.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.30.6",

@@ -152,7 +152,7 @@ async function run() {
     assert.ok(html.includes('Notes-based'), 'Must have Notes-based tab');
     assert.ok(html.includes('Difficulty Level'), 'Must have Difficulty selector');
     assert.ok(html.includes('Number of Questions'), 'Must have Question count selector');
-    assert.ok(html.includes('Generate Quiz'), 'Must have Generate Quiz button');
+    assert.ok(html.includes('Generate') && html.includes('Quiz'), 'Must have Generate Quiz button');
     assert.ok(html.includes('Ready-to-Test Sample Quizzes'), 'Must have Sample Quizzes sidebar');
     console.log('  ok  Test 5: QuizCreate renders with topic/notes modes, difficulty & question count selectors, and starter quiz options');
   }

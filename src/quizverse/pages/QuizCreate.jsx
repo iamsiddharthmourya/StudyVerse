@@ -1,21 +1,26 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  Clock,
   FileText,
   Info,
   Layers,
+  Loader2,
   Play,
   PlusCircle,
   Sparkles,
   Upload,
   X,
 } from 'lucide-react';
+import { useAuth } from '../../services/auth.jsx';
 import { useQuiz } from '../state/QuizContext.jsx';
-import { useUI, Modal } from '../../components/ui.jsx';
+import { useUI } from '../../components/ui.jsx';
 import { SAMPLE_QUIZZES } from '../utils/sampleQuizzes.js';
+import { fetchDailyQuota, generateQuizWithBackend } from '../services/quizApi.js';
 import QuizTopBar from '../components/QuizTopBar.jsx';
 
 const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
@@ -23,6 +28,7 @@ const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.txt'];
 
 export default function QuizCreate() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { createQuiz } = useQuiz();
   const { toast } = useUI();
   const fileInputRef = useRef(null);
@@ -40,10 +46,32 @@ export default function QuizCreate() {
   const [fileError, setFileError] = useState('');
   const [isDragging, setIsDragging] = useState(false);
 
-  // Validation & modal state
+  // Quota & generation state
+  const [quota, setQuota] = useState(null);
   const [fieldErrors, setFieldErrors] = useState({});
-  const [showAiModal, setShowAiModal] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationStep, setGenerationStep] = useState('');
+  const [apiError, setApiError] = useState('');
+  const [isSubmittingSample, setIsSubmittingSample] = useState(false);
+
+  // Load daily quota on mount
+  useEffect(() => {
+    let active = true;
+    async function loadQuota() {
+      try {
+        const q = await fetchDailyQuota(user);
+        if (active && q) {
+          setQuota(q);
+        }
+      } catch (err) {
+        console.warn('Could not load quota:', err);
+      }
+    }
+    loadQuota();
+    return () => {
+      active = false;
+    };
+  }, [user]);
 
   // File validation
   const validateAndSetFile = (file) => {
@@ -99,9 +127,10 @@ export default function QuizCreate() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Trigger form validation and show Phase 5 info modal
-  const handleGenerateClick = (e) => {
+  // Trigger AI Generation
+  const handleGenerateClick = async (e) => {
     e.preventDefault();
+    setApiError('');
     const errors = {};
 
     if (sourceMode === 'topic') {
@@ -120,15 +149,66 @@ export default function QuizCreate() {
     }
 
     setFieldErrors({});
-    setShowAiModal(true);
+
+    // Check quota client-side warning
+    if (quota && quota.remaining <= 0) {
+      setApiError('You have reached your daily limit of 5 AI quizzes. Quota resets at midnight IST.');
+      return;
+    }
+
+    setIsGenerating(true);
+    setGenerationStep(
+      sourceMode === 'document'
+        ? 'Extracting document text and analyzing concepts…'
+        : 'Formulating questions and explanations with Gemini AI…'
+    );
+
+    try {
+      const result = await generateQuizWithBackend(
+        user,
+        {
+          sourceType: sourceMode,
+          topic: topic.trim(),
+          subject: subject.trim(),
+          instructions: instructions.trim(),
+          difficulty,
+          questionCount,
+        },
+        selectedFile
+      );
+
+      // Save generated quiz into user store
+      setGenerationStep('Saving quiz to your library…');
+      const savedQuiz = await createQuiz(result.quiz);
+
+      // Update quota display
+      if (result.quota) {
+        setQuota((prev) => ({ ...prev, ...result.quota }));
+      }
+
+      toast(`Quiz "${savedQuiz.title}" created with Gemini AI!`, 'success');
+      navigate(`/quiz/play/${savedQuiz.id}`);
+    } catch (err) {
+      console.error('Quiz generation error:', err);
+      setApiError(err.message || 'Failed to generate quiz. Please check your connection or try again.');
+
+      // Refresh quota if 429
+      if (err.status === 429 || err.code === 'DAILY_QUOTA_EXCEEDED') {
+        const q = await fetchDailyQuota(user);
+        if (q) setQuota(q);
+      }
+    } finally {
+      setIsGenerating(false);
+      setGenerationStep('');
+    }
   };
 
-  // Create a real sample quiz immediately so user can test the Quiz Player & Results
+  // Create a sample quiz immediately
   const handleCreateSampleQuiz = async (sampleIndex = 0) => {
-    setIsSubmitting(true);
+    setIsSubmittingSample(true);
+    setApiError('');
     try {
       const sample = SAMPLE_QUIZZES[sampleIndex] || SAMPLE_QUIZZES[0];
-      // Clone and adjust title if user provided topic
       const customTitle = topic.trim()
         ? `${topic.trim()} (Practice Quiz)`
         : sample.title;
@@ -142,13 +222,12 @@ export default function QuizCreate() {
       };
 
       const created = await createQuiz(newQuizData);
-      toast('Quiz created! Ready for practice.', 'success');
-      setShowAiModal(false);
+      toast('Practice quiz ready!', 'success');
       navigate(`/quiz/play/${created.id}`);
     } catch (err) {
-      toast(err.message || 'Failed to create quiz.', 'error');
+      toast(err.message || 'Failed to create starter quiz.', 'error');
     } finally {
-      setIsSubmitting(false);
+      setIsSubmittingSample(false);
     }
   };
 
@@ -158,6 +237,8 @@ export default function QuizCreate() {
     }
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   };
+
+  const isQuotaExceeded = quota && quota.remaining <= 0;
 
   return (
     <div className="quiz-shell">
@@ -173,11 +254,60 @@ export default function QuizCreate() {
             <ArrowLeft size={16} aria-hidden="true" />
             <span>Back to Dashboard</span>
           </button>
-          <h1>Create New Quiz</h1>
-          <p className="muted">
-            Configure your topic or study notes, choose question difficulty, and generate practice questions.
-          </p>
+          <div className="quiz-create-title-row">
+            <div>
+              <h1>Create New Quiz</h1>
+              <p className="muted">
+                Synthesize questions from study topics or lecture notes powered by Google Gemini.
+              </p>
+            </div>
+
+            {/* Daily Quota Pill Badge */}
+            {quota && (
+              <div className={`quota-status-pill ${isQuotaExceeded ? 'quota-exhausted' : ''}`}>
+                <Sparkles size={14} className="teal-icon" aria-hidden="true" />
+                <span>
+                  Daily AI Quota: <strong>{quota.remaining} / {quota.limit}</strong> remaining
+                </span>
+                <span className="quota-tooltip-icon" title="Resets daily at Midnight IST (UTC+05:30)">
+                  <Clock size={13} aria-hidden="true" />
+                </span>
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* Quota Exceeded Warning Banner */}
+        {isQuotaExceeded && (
+          <div className="card quota-alert-card" role="alert">
+            <div className="quota-alert-head">
+              <AlertCircle size={20} className="alert-icon-warning" aria-hidden="true" />
+              <div>
+                <strong>Daily Generation Limit Reached (5/5)</strong>
+                <p className="muted small">
+                  You have used all 5 of your free AI quiz generations for today. Your quota resets at{' '}
+                  <strong>Midnight IST (00:00 IST)</strong>.
+                </p>
+              </div>
+            </div>
+            <p className="small muted">
+              You can still practice all previously created quizzes, review results, or test with our sample quizzes below without consuming quota.
+            </p>
+          </div>
+        )}
+
+        {/* API Error Alert */}
+        {apiError && (
+          <div className="card quota-alert-card error-card" role="alert">
+            <div className="quota-alert-head">
+              <AlertTriangle size={20} className="alert-icon-error" aria-hidden="true" />
+              <div>
+                <strong>Quiz Generation Notice</strong>
+                <p className="small">{apiError}</p>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="quiz-create-grid">
           {/* Main Creator Form */}
@@ -199,6 +329,7 @@ export default function QuizCreate() {
                     setSourceMode('topic');
                     setFieldErrors({});
                   }}
+                  disabled={isGenerating}
                 >
                   <Sparkles size={18} aria-hidden="true" />
                   <div>
@@ -216,6 +347,7 @@ export default function QuizCreate() {
                     setSourceMode('document');
                     setFieldErrors({});
                   }}
+                  disabled={isGenerating}
                 >
                   <FileText size={18} aria-hidden="true" />
                   <div>
@@ -235,13 +367,14 @@ export default function QuizCreate() {
                     <input
                       id="quiz-topic"
                       type="text"
-                      placeholder="e.g. Cellular Respiration and ATP Synthesis"
+                      placeholder="e.g. Cellular Respiration and Krebs Cycle"
                       value={topic}
                       onChange={(e) => {
                         setTopic(e.target.value);
                         if (fieldErrors.topic) setFieldErrors((prev) => ({ ...prev, topic: '' }));
                       }}
                       maxLength={200}
+                      disabled={isGenerating}
                     />
                     {fieldErrors.topic ? (
                       <p className="field-err" role="alert">
@@ -261,6 +394,7 @@ export default function QuizCreate() {
                       value={subject}
                       onChange={(e) => setSubject(e.target.value)}
                       maxLength={100}
+                      disabled={isGenerating}
                     />
                   </div>
 
@@ -273,6 +407,7 @@ export default function QuizCreate() {
                       value={instructions}
                       onChange={(e) => setInstructions(e.target.value)}
                       maxLength={1000}
+                      disabled={isGenerating}
                     />
                   </div>
                 </div>
@@ -288,15 +423,18 @@ export default function QuizCreate() {
                     accept=".pdf,.docx,.txt"
                     style={{ display: 'none' }}
                     onChange={handleFileChange}
+                    disabled={isGenerating}
                   />
 
                   {!selectedFile ? (
                     <div
-                      className={`file-dropzone ${isDragging ? 'dragging' : ''} ${fieldErrors.file || fileError ? 'has-error' : ''}`}
+                      className={`file-dropzone ${isDragging ? 'dragging' : ''} ${
+                        fieldErrors.file || fileError ? 'has-error' : ''
+                      }`}
                       onDragOver={handleDragOver}
                       onDragLeave={handleDragLeave}
                       onDrop={handleDrop}
-                      onClick={() => fileInputRef.current?.click()}
+                      onClick={() => !isGenerating && fileInputRef.current?.click()}
                     >
                       <div className="dropzone-icon">
                         <Upload size={28} aria-hidden="true" />
@@ -317,7 +455,7 @@ export default function QuizCreate() {
                       <div className="file-card-info">
                         <strong className="file-name">{selectedFile.name}</strong>
                         <span className="file-size muted small">
-                          {formatFileSize(selectedFile.size)} · Ready for quiz generation
+                          {formatFileSize(selectedFile.size)} · Ready for text extraction
                         </span>
                       </div>
                       <div className="file-card-actions">
@@ -326,6 +464,7 @@ export default function QuizCreate() {
                           className="btn ghost sm"
                           onClick={() => fileInputRef.current?.click()}
                           title="Choose a different file"
+                          disabled={isGenerating}
                         >
                           Replace
                         </button>
@@ -335,6 +474,7 @@ export default function QuizCreate() {
                           onClick={handleRemoveFile}
                           title="Remove file"
                           aria-label="Remove file"
+                          disabled={isGenerating}
                         >
                           <X size={16} />
                         </button>
@@ -380,6 +520,7 @@ export default function QuizCreate() {
                         aria-checked={difficulty === d.id}
                         className={`pill-option ${difficulty === d.id ? 'active' : ''}`}
                         onClick={() => setDifficulty(d.id)}
+                        disabled={isGenerating}
                       >
                         {d.label}
                       </button>
@@ -399,6 +540,7 @@ export default function QuizCreate() {
                         aria-checked={questionCount === num}
                         className={`pill-option ${questionCount === num ? 'active' : ''}`}
                         onClick={() => setQuestionCount(num)}
+                        disabled={isGenerating}
                       >
                         {num} Qs
                       </button>
@@ -406,7 +548,7 @@ export default function QuizCreate() {
                   </div>
                 </div>
 
-                {/* Question Type */}
+                {/* Question Format */}
                 <div className="field">
                   <label>Question Format</label>
                   <div className="static-format-pill">
@@ -417,14 +559,32 @@ export default function QuizCreate() {
               </div>
             </section>
 
+            {/* Progress status banner when generating */}
+            {isGenerating && (
+              <div className="ai-generating-banner">
+                <Loader2 size={18} className="spin teal-icon" aria-hidden="true" />
+                <span className="generating-text">{generationStep}</span>
+              </div>
+            )}
+
             {/* Form Actions */}
             <div className="form-actions-footer">
               <button
                 type="submit"
                 className="btn primary lg generate-btn"
+                disabled={isGenerating || isQuotaExceeded}
               >
-                <Sparkles size={18} aria-hidden="true" />
-                <span>Generate Quiz</span>
+                {isGenerating ? (
+                  <>
+                    <Loader2 size={18} className="spin" aria-hidden="true" />
+                    <span>Generating Quiz…</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={18} aria-hidden="true" />
+                    <span>Generate AI Quiz</span>
+                  </>
+                )}
               </button>
             </div>
           </form>
@@ -438,12 +598,11 @@ export default function QuizCreate() {
                 </div>
                 <div>
                   <h3>Ready-to-Test Sample Quizzes</h3>
-                  <p className="muted small">Instant test quizzes for Phase 4 verification</p>
+                  <p className="muted small">Instant test quizzes (Consumes 0 AI quota)</p>
                 </div>
               </div>
               <p className="small muted">
-                Want to test the interactive quiz player, drift-proof timer, and results engine right now?
-                Load one of our structured sample quizzes:
+                Want to practice or verify the Quiz Player without consuming your daily AI quota? Load one of our structured sample quizzes:
               </p>
 
               <div className="sample-quiz-buttons">
@@ -453,7 +612,7 @@ export default function QuizCreate() {
                     type="button"
                     className="sample-quiz-card-btn"
                     onClick={() => handleCreateSampleQuiz(idx)}
-                    disabled={isSubmitting}
+                    disabled={isGenerating || isSubmittingSample}
                   >
                     <div className="sample-btn-title">
                       <strong>{sample.title}</strong>
@@ -468,78 +627,15 @@ export default function QuizCreate() {
             <div className="card phase-info-card">
               <div className="phase-info-head">
                 <Info size={18} className="info-icon" aria-hidden="true" />
-                <strong>Phase 4 & 5 Roadmap</strong>
+                <strong>Daily Quota Policy</strong>
               </div>
               <p className="muted small">
-                Phase 4 establishes the complete interactive frontend, file size validation (≤ 5 MB),
-                and data wiring. Phase 5 will connect this screen directly to our secure Google Gemini serverless backend.
+                Every user is granted 5 AI quiz generations per day. Failed requests, taking quizzes, and reviewing explanations never consume quota. Resets every night at midnight IST.
               </p>
             </div>
           </aside>
         </div>
       </main>
-
-      {/* Phase 5 AI Connection Modal */}
-      <Modal
-        open={showAiModal}
-        onClose={() => setShowAiModal(false)}
-        title="AI Quiz Generation (Phase 5)"
-      >
-        <div className="ai-modal-content">
-          <div className="ai-modal-badge">
-            <Sparkles size={16} aria-hidden="true" />
-            <span>Scheduled for Phase 5</span>
-          </div>
-
-          <p>
-            Your quiz inputs have been validated:
-          </p>
-          <ul className="ai-modal-specs">
-            <li>
-              <strong>Source:</strong>{' '}
-              {sourceMode === 'topic' ? `Topic: "${topic}"` : `Document: "${selectedFile?.name}"`}
-            </li>
-            <li>
-              <strong>Settings:</strong> {questionCount} Questions · {difficulty.toUpperCase()} difficulty
-            </li>
-          </ul>
-
-          <div className="ai-notice-callout">
-            <Info size={18} aria-hidden="true" className="notice-icon" />
-            <div>
-              <strong>Gemini AI Backend Connection:</strong>
-              <p className="muted small">
-                Automated document parsing and dynamic AI question generation are scheduled for Phase 5
-                via our secure Vercel serverless backend.
-              </p>
-            </div>
-          </div>
-
-          <p className="muted small">
-            To test the Quiz Player, timer, answer tracking, and score results right now, you can create
-            a starter quiz based on your topic:
-          </p>
-
-          <div className="modal-actions">
-            <button
-              type="button"
-              className="btn ghost"
-              onClick={() => setShowAiModal(false)}
-            >
-              Keep Editing
-            </button>
-            <button
-              type="button"
-              className="btn primary"
-              onClick={() => handleCreateSampleQuiz(0)}
-              disabled={isSubmitting}
-            >
-              <Play size={16} aria-hidden="true" />
-              <span>{isSubmitting ? 'Creating…' : 'Create & Play Practice Quiz'}</span>
-            </button>
-          </div>
-        </div>
-      </Modal>
     </div>
   );
 }
