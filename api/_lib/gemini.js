@@ -5,9 +5,6 @@
 import { validateQuiz } from '../../src/quizverse/services/quizValidation.js';
 import { generateQuestionId } from '../../src/quizverse/utils/quizHelpers.js';
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-const FALLBACK_MODEL = 'gemini-1.5-flash';
 const REQUEST_TIMEOUT_MS = 45000; // 45 seconds timeout
 
 /**
@@ -82,10 +79,12 @@ RESPOND STRICTLY WITH A VALID JSON OBJECT adhering to this schema:
 }
 
 /**
- * Execute request to Gemini API.
+ * Execute request to Gemini API with support for both v1 and v1beta endpoints.
  */
-async function sendGeminiRequest(apiKey, model, prompt) {
-  const url = `${GEMINI_API_URL}/${model}:generateContent`;
+async function sendGeminiRequest(apiKey, model, prompt, apiVersion = 'v1beta') {
+  const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
+  const cleanModel = model.replace(/^models\//, '').trim().replace(/^["']|["']$/g, '');
+  const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${cleanModel}:generateContent?key=${encodeURIComponent(cleanKey)}`;
 
   const requestBody = {
     contents: [
@@ -104,7 +103,7 @@ async function sendGeminiRequest(apiKey, model, prompt) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
+      'x-goog-api-key': cleanKey,
     },
     body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -130,8 +129,8 @@ async function sendGeminiRequest(apiKey, model, prompt) {
  * Generate a complete, schema-validated quiz using Google Gemini API.
  */
 export async function generateQuizWithGemini(params) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) {
+  const rawKey = process.env.GEMINI_API_KEY;
+  if (!rawKey || typeof rawKey !== 'string' || !rawKey.trim()) {
     const err = new Error(
       'GEMINI_API_KEY is not configured on the server. Please add your GEMINI_API_KEY to your environment variables.'
     );
@@ -140,19 +139,44 @@ export async function generateQuizWithGemini(params) {
     throw err;
   }
 
+  const cleanKey = rawKey.trim().replace(/^["']|["']$/g, '');
   const prompt = buildPrompt(params);
 
-  // Attempt primary model first, fallback to secondary model if model is unavailable
+  // Candidate endpoints to attempt in order of preference
+  const customModel = process.env.GEMINI_MODEL?.trim().replace(/^["']|["']$/g, '');
+  const candidateEndpoints = [
+    ...(customModel ? [{ model: customModel, version: 'v1beta' }, { model: customModel, version: 'v1' }] : []),
+    { model: 'gemini-2.0-flash', version: 'v1beta' },
+    { model: 'gemini-1.5-flash', version: 'v1' },
+    { model: 'gemini-1.5-flash', version: 'v1beta' },
+    { model: 'gemini-2.5-flash', version: 'v1beta' },
+    { model: 'gemini-1.5-pro', version: 'v1' },
+  ];
+
   let rawResponse = null;
-  try {
-    rawResponse = await sendGeminiRequest(apiKey.trim(), DEFAULT_MODEL, prompt);
-  } catch (primaryErr) {
-    if (primaryErr.status === 404 && DEFAULT_MODEL !== FALLBACK_MODEL) {
-      console.warn(`[Gemini] ${DEFAULT_MODEL} returned 404. Falling back to ${FALLBACK_MODEL}...`);
-      rawResponse = await sendGeminiRequest(apiKey.trim(), FALLBACK_MODEL, prompt);
-    } else {
-      throw primaryErr;
+  let lastError = null;
+
+  for (const candidate of candidateEndpoints) {
+    try {
+      rawResponse = await sendGeminiRequest(cleanKey, candidate.model, prompt, candidate.version);
+      if (rawResponse) break;
+    } catch (err) {
+      lastError = err;
+      if (err.status === 404) {
+        console.warn(`[Gemini] ${candidate.model} (${candidate.version}) returned 404. Trying next supported endpoint...`);
+        continue;
+      }
+      throw err;
     }
+  }
+
+  if (!rawResponse && lastError) {
+    if (lastError.status === 404) {
+      throw new Error(
+        `Gemini API returned HTTP 404: The model could not be found for your API key. Please verify that 'Generative Language API' is enabled in your Google Cloud Project or generate an API key directly from Google AI Studio (https://aistudio.google.com/).`
+      );
+    }
+    throw lastError;
   }
 
   // Extract text from Gemini candidates
