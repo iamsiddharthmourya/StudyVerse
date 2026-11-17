@@ -16,7 +16,12 @@ import {
   MAX_FILE_SIZE_BYTES,
   MIN_TEXT_LENGTH,
 } from '../api/_lib/extractor.js';
-import { generateQuizWithGemini } from '../api/_lib/gemini.js';
+import {
+  generateQuizWithGemini,
+  discoverSupportedModels,
+  resolveModelPlan,
+  _resetModelCacheForTesting,
+} from '../api/_lib/gemini.js';
 import { validateQuiz } from '../src/quizverse/services/quizValidation.js';
 
 // Minimal valid PDF with >50 chars of text
@@ -325,7 +330,71 @@ async function run() {
     console.log('  ok  Test 10: Server key absence handled gracefully with clear configuration advice');
   }
 
-  console.log('\nAll 10 Phase 5 Gemini Backend & Quota Tests Passed Successfully!');
+  // =========================================================================
+  // Test K: Dynamic models.list Discovery & generateContent Model Selection
+  // =========================================================================
+  {
+    _resetModelCacheForTesting();
+    const originalFetch = global.fetch;
+
+    // Mock Google models.list endpoint
+    global.fetch = async (url) => {
+      if (url.includes('/models?')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            models: [
+              {
+                name: 'models/embedding-001',
+                displayName: 'Embedding Model',
+                supportedGenerationMethods: ['embedContent'],
+              },
+              {
+                name: 'models/gemini-1.5-flash',
+                displayName: 'Gemini 1.5 Flash',
+                supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
+              },
+              {
+                name: 'models/gemini-2.0-flash',
+                displayName: 'Gemini 2.0 Flash',
+                supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
+              },
+              {
+                name: 'models/aqa',
+                displayName: 'Attributed Question Answering',
+                supportedGenerationMethods: ['generateAnswer'],
+              },
+            ],
+          }),
+        };
+      }
+      return originalFetch(url);
+    };
+
+    const discovered = await discoverSupportedModels('mock_api_key_test');
+    assert.strictEqual(discovered.length, 2, 'Only models supporting generateContent must be discovered');
+    assert.ok(discovered.some((m) => m.id === 'gemini-2.0-flash'));
+    assert.ok(discovered.some((m) => m.id === 'gemini-1.5-flash'));
+    assert.ok(!discovered.some((m) => m.id === 'embedding-001'), 'Embedding models must be excluded');
+
+    // Test selection ranking: gemini-2.0-flash ranked above gemini-1.5-flash
+    const plan = await resolveModelPlan('mock_api_key_test', null);
+    assert.strictEqual(plan[0].model, 'gemini-2.0-flash');
+    assert.strictEqual(plan[0].source, 'discovered_primary');
+
+    // Test outdated/unsupported GEMINI_MODEL fallback:
+    // If user configured an outdated model not in discovered list, it must safely fall back
+    const planWithInvalidOverride = await resolveModelPlan('mock_api_key_test', 'deprecated-palm-2');
+    assert.strictEqual(planWithInvalidOverride[0].model, 'gemini-2.0-flash', 'Must fall back to active discovered model');
+
+    // Restore
+    global.fetch = originalFetch;
+    _resetModelCacheForTesting();
+    console.log('  ok  Test 11: Dynamic models.list discovery verified; selects active generateContent models');
+  }
+
+  console.log('\nAll 11 Phase 5 Gemini Backend & Quota Tests Passed Successfully!');
 }
 
 run().catch((err) => {

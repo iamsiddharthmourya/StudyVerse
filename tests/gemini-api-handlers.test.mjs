@@ -81,6 +81,20 @@ async function run() {
 
     global.fetch = async (url) => {
       if (url.includes('generativelanguage.googleapis.com')) {
+        if (url.includes('/models?')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              models: [
+                {
+                  name: 'models/gemini-2.0-flash',
+                  supportedGenerationMethods: ['generateContent'],
+                },
+              ],
+            }),
+          };
+        }
         return {
           ok: true,
           status: 200,
@@ -171,6 +185,84 @@ async function run() {
     assert.strictEqual(errRes.body.error, 'GEMINI_GENERATION_FAILED');
     assert.strictEqual(errRes.body.remaining, 4, 'Quota must NOT be consumed on failure; remains 4');
     console.log('  ok  Test 4: Failed Gemini generation rolls back slot; quota remains preserved');
+
+    // Test 5: POST /api/generate-quiz (Notes/Document-based) generates quiz from notes
+    global.fetch = async (url) => {
+      if (url.includes('generativelanguage.googleapis.com')) {
+        if (url.includes('/models?')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              models: [
+                {
+                  name: 'models/gemini-2.0-flash',
+                  supportedGenerationMethods: ['generateContent'],
+                },
+              ],
+            }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        title: 'Cellular Biology Notes Quiz',
+                        description: 'Generated from student class notes',
+                        questions: [
+                          {
+                            question: 'What is the function of mitochondria according to notes?',
+                            options: [
+                              'ATP generation via cellular respiration',
+                              'Protein synthesis in ribosomes',
+                              'DNA storage in nucleus',
+                              'Lipid breakdown in peroxisomes',
+                            ],
+                            correctIndex: 0,
+                            explanation: 'Mitochondria produce ATP through cellular respiration.',
+                          },
+                        ],
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        };
+      }
+      return originalFetch(url);
+    };
+
+    const { req: docReq, res: docRes } = createMockReqRes({
+      method: 'POST',
+      url: '/api/generate-quiz',
+      headers: {
+        'content-type': 'application/json',
+        'x-guest-token': guestToken,
+      },
+      body: {
+        sourceType: 'document',
+        extractedText:
+          'Mitochondria are membrane-bound cell organelles that generate most of the chemical energy needed to power the cell biochemical reactions. Chemical energy produced by the mitochondria is stored in a small molecule called adenosine triphosphate or ATP.',
+        difficulty: 'medium',
+        questionCount: 1,
+      },
+    });
+
+    await generateQuizHandler(docReq, docRes);
+    assert.strictEqual(docRes.statusCode, 200);
+    assert.strictEqual(docRes.body.success, true);
+    assert.strictEqual(docRes.body.quiz.title, 'Cellular Biology Notes Quiz');
+    assert.strictEqual(docRes.body.quiz.sourceType, 'document');
+    assert.strictEqual(docRes.body.quota.remaining, 3, 'Second successful generation leaves 3 quota');
+    console.log('  ok  Test 5: POST /api/generate-quiz (Notes/Document-based) generates quiz from notes');
 
     // Restore fetch
     global.fetch = originalFetch;

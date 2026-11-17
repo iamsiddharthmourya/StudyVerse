@@ -168,9 +168,10 @@ export async function parseQuizRequest(req) {
         // Base64 document payload
         const buffer = Buffer.from(body.fileData, 'base64');
         extractedText = await extractTextFromBuffer(buffer, body.fileName || '');
-      } else if (body.text) {
+      } else if (body.text || body.extractedText) {
         // Direct text payload
-        extractedText = await extractTextFromBuffer(Buffer.from(body.text, 'utf8'), 'notes.txt');
+        const rawContent = body.text || body.extractedText;
+        extractedText = await extractTextFromBuffer(Buffer.from(rawContent, 'utf8'), 'notes.txt');
       } else {
         throw new Error('Document content (fileData or text) is required for notes-based quizzes.');
       }

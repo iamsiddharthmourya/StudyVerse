@@ -79,12 +79,175 @@ RESPOND STRICTLY WITH A VALID JSON OBJECT adhering to this schema:
 }
 
 /**
+ * Discover models using Google's models.list endpoint and select those that support generateContent.
+ * Caches discovery results for 5 minutes to avoid redundant network calls.
+ */
+let cachedModels = null;
+let cachedModelsExpiresAt = 0;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+export async function discoverSupportedModels(apiKey) {
+  const now = Date.now();
+  if (cachedModels && now < cachedModelsExpiresAt) {
+    return cachedModels;
+  }
+
+  const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
+  const versions = ['v1beta', 'v1'];
+  const discovered = [];
+
+  for (const ver of versions) {
+    try {
+      const listUrl = `https://generativelanguage.googleapis.com/${ver}/models?key=${encodeURIComponent(cleanKey)}`;
+      console.log(`[Gemini Diagnostic] Querying models.list via ${ver}...`);
+
+      const response = await fetch(listUrl, {
+        method: 'GET',
+        headers: {
+          'x-goog-api-key': cleanKey,
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+
+      console.log(`[Gemini Diagnostic] models.list (${ver}) returned HTTP ${response.status}`);
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const data = await response.json();
+      if (!Array.isArray(data?.models) || data.models.length === 0) {
+        continue;
+      }
+
+      // Filter models that explicitly support generateContent
+      const capableModels = data.models
+        .filter(
+          (m) =>
+            Array.isArray(m.supportedGenerationMethods) &&
+            m.supportedGenerationMethods.includes('generateContent')
+        )
+        .map((m) => {
+          const rawName = m.name || '';
+          const id = rawName.replace(/^models\//, '');
+          return {
+            id,
+            fullName: rawName,
+            version: ver,
+            displayName: m.displayName || id,
+            supportedMethods: m.supportedGenerationMethods,
+          };
+        });
+
+      if (capableModels.length > 0) {
+        console.log(
+          `[Gemini Diagnostic] Discovered ${capableModels.length} models supporting generateContent via ${ver}: ${capableModels.map((m) => m.id).join(', ')}`
+        );
+        discovered.push(...capableModels);
+        break; // Successfully discovered with this version
+      }
+    } catch (err) {
+      console.warn(`[Gemini Diagnostic] Could not list models on ${ver}:`, err.message);
+    }
+  }
+
+  if (discovered.length > 0) {
+    cachedModels = discovered;
+    cachedModelsExpiresAt = now + CACHE_TTL_MS;
+  }
+
+  return discovered;
+}
+
+/**
+ * Determine the optimal model execution plan based on models.list and user configuration.
+ */
+export async function resolveModelPlan(apiKey, userConfiguredModel) {
+  const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
+
+  // 1. Discover models using Google's models.list endpoint
+  const discovered = await discoverSupportedModels(cleanKey);
+
+  // 2. Check if user set GEMINI_MODEL and whether it explicitly supports generateContent
+  if (userConfiguredModel) {
+    const cleanUser = userConfiguredModel.replace(/^models\//, '').trim().replace(/^["']|["']$/g, '');
+    const userMatch = discovered.find((m) => m.id.toLowerCase() === cleanUser.toLowerCase());
+    if (userMatch) {
+      console.log(
+        `[Gemini Diagnostic] Configured GEMINI_MODEL "${cleanUser}" verified in models.list with generateContent support.`
+      );
+      return [
+        { model: userMatch.id, version: userMatch.version, source: 'verified_config' },
+        ...discovered
+          .filter((m) => m.id !== userMatch.id)
+          .map((m) => ({ model: m.id, version: m.version, source: 'discovered_fallback' })),
+      ];
+    } else if (discovered.length > 0) {
+      console.warn(
+        `[Gemini Diagnostic] GEMINI_MODEL "${cleanUser}" does not support generateContent or was not found in models.list. Falling back to active discovered models.`
+      );
+    }
+  }
+
+  // 3. Select best model from discovered models supporting generateContent
+  if (discovered.length > 0) {
+    const preference = [
+      /gemini-2\.5-flash/i,
+      /gemini-2\.0-flash/i,
+      /gemini-1\.5-flash/i,
+      /gemini-1\.5-pro/i,
+      /gemini-2/i,
+      /flash/i,
+      /gemini/i,
+    ];
+
+    const sorted = [...discovered].sort((a, b) => {
+      const idxA = preference.findIndex((p) => p.test(a.id));
+      const idxB = preference.findIndex((p) => p.test(b.id));
+      return (idxA === -1 ? 999 : idxA) - (idxB === -1 ? 999 : idxB);
+    });
+
+    console.log(
+      `[Gemini Diagnostic] Selected dynamic verified model: ${sorted[0].id} (endpoint: ${sorted[0].version})`
+    );
+
+    return sorted.map((m, i) => ({
+      model: m.id,
+      version: m.version,
+      source: i === 0 ? 'discovered_primary' : 'discovered_fallback',
+    }));
+  }
+
+  // 4. Fallback candidate list if models.list was unreachable
+  console.log(
+    '[Gemini Diagnostic] models.list query returned 0 models. Using resilient fallback candidate list across v1 and v1beta.'
+  );
+  return [
+    { model: 'gemini-2.0-flash', version: 'v1beta', source: 'static' },
+    { model: 'gemini-1.5-flash', version: 'v1', source: 'static' },
+    { model: 'gemini-1.5-flash', version: 'v1beta', source: 'static' },
+    { model: 'gemini-2.5-flash', version: 'v1beta', source: 'static' },
+    { model: 'gemini-1.5-pro', version: 'v1', source: 'static' },
+  ];
+}
+
+/**
+ * Clear cached models (strictly for testing).
+ */
+export function _resetModelCacheForTesting() {
+  cachedModels = null;
+  cachedModelsExpiresAt = 0;
+}
+
+/**
  * Execute request to Gemini API with support for both v1 and v1beta endpoints.
  */
 async function sendGeminiRequest(apiKey, model, prompt, apiVersion = 'v1beta') {
   const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
   const cleanModel = model.replace(/^models\//, '').trim().replace(/^["']|["']$/g, '');
   const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${cleanModel}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+
+  console.log(`[Gemini Diagnostic] Calling ${apiVersion}/models/${cleanModel}:generateContent...`);
 
   const requestBody = {
     contents: [
@@ -108,6 +271,8 @@ async function sendGeminiRequest(apiKey, model, prompt, apiVersion = 'v1beta') {
     body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
+
+  console.log(`[Gemini Diagnostic] Response status: HTTP ${response.status} from ${cleanModel} (${apiVersion})`);
 
   if (!response.ok) {
     let errorDetail = '';
@@ -142,28 +307,27 @@ export async function generateQuizWithGemini(params) {
   const cleanKey = rawKey.trim().replace(/^["']|["']$/g, '');
   const prompt = buildPrompt(params);
 
-  // Candidate endpoints to attempt in order of preference
-  const customModel = process.env.GEMINI_MODEL?.trim().replace(/^["']|["']$/g, '');
-  const candidateEndpoints = [
-    ...(customModel ? [{ model: customModel, version: 'v1beta' }, { model: customModel, version: 'v1' }] : []),
-    { model: 'gemini-2.0-flash', version: 'v1beta' },
-    { model: 'gemini-1.5-flash', version: 'v1' },
-    { model: 'gemini-1.5-flash', version: 'v1beta' },
-    { model: 'gemini-2.5-flash', version: 'v1beta' },
-    { model: 'gemini-1.5-pro', version: 'v1' },
-  ];
+  // Discover supported models and plan execution
+  const modelPlan = await resolveModelPlan(cleanKey, process.env.GEMINI_MODEL);
 
   let rawResponse = null;
   let lastError = null;
+  let successfulModel = null;
 
-  for (const candidate of candidateEndpoints) {
+  for (const item of modelPlan) {
     try {
-      rawResponse = await sendGeminiRequest(cleanKey, candidate.model, prompt, candidate.version);
-      if (rawResponse) break;
+      rawResponse = await sendGeminiRequest(cleanKey, item.model, prompt, item.version);
+      if (rawResponse) {
+        successfulModel = item;
+        console.log(`[Gemini Diagnostic] Successfully generated quiz with model: ${item.model} (${item.version})`);
+        break;
+      }
     } catch (err) {
       lastError = err;
-      if (err.status === 404) {
-        console.warn(`[Gemini] ${candidate.model} (${candidate.version}) returned 404. Trying next supported endpoint...`);
+      if (err.status === 404 || err.status === 400) {
+        console.warn(
+          `[Gemini Diagnostic] Model ${item.model} (${item.version}) failed with HTTP ${err.status}. Trying next candidate...`
+        );
         continue;
       }
       throw err;
@@ -173,7 +337,7 @@ export async function generateQuizWithGemini(params) {
   if (!rawResponse && lastError) {
     if (lastError.status === 404) {
       throw new Error(
-        `Gemini API returned HTTP 404: The model could not be found for your API key. Please verify that 'Generative Language API' is enabled in your Google Cloud Project or generate an API key directly from Google AI Studio (https://aistudio.google.com/).`
+        `Gemini API returned HTTP 404: No models supporting generateContent could be accessed with your API key. Please verify that 'Generative Language API' is enabled in your Google Cloud Project or generate an API key directly from Google AI Studio (https://aistudio.google.com/).`
       );
     }
     throw lastError;
