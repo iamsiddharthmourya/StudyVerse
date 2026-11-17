@@ -40,7 +40,8 @@ async function run() {
   // Load pages directly to test their rendering
   const { default: LandingPage } = await server.ssrLoadModule('./src/pages/LandingPage.jsx');
   const { default: QuizDashboard } = await server.ssrLoadModule('./src/quizverse/pages/QuizDashboard.jsx');
-  const { default: QuizPlaceholder } = await server.ssrLoadModule('./src/quizverse/pages/QuizPlaceholder.jsx');
+  const { default: QuizHistory } = await server.ssrLoadModule('./src/quizverse/pages/QuizHistory.jsx');
+  const { QuizProvider } = await server.ssrLoadModule('./src/quizverse/state/QuizContext.jsx');
   const { default: DailyTasks } = await server.ssrLoadModule('./src/pages/DailyTasks.jsx');
   const { default: Dashboard } = await server.ssrLoadModule('./src/pages/Dashboard.jsx');
   const { AuthProvider } = await server.ssrLoadModule('./src/services/auth.jsx');
@@ -145,23 +146,25 @@ async function run() {
           UIProvider,
           null,
           React.createElement(
-            MemoryRouter,
-            { initialEntries: ['/quiz'] },
-            React.createElement(QuizDashboard)
+            QuizProvider,
+            null,
+            React.createElement(
+              MemoryRouter,
+              { initialEntries: ['/quiz'] },
+              React.createElement(QuizDashboard)
+            )
           )
         )
       )
     );
-    assert.ok(html.includes('QuizVerse Dashboard'), 'Quiz dashboard must render title');
+    assert.ok(html.includes('Welcome back'), 'Quiz dashboard must render welcome greeting');
     assert.ok(html.includes('Create a Quiz'), 'Quiz dashboard must render Create card');
-    assert.ok(html.includes('Quiz Player'), 'Quiz dashboard must render Player card');
-    assert.ok(html.includes('Results &amp; Explanations') || html.includes('Results & Explanations'), 'Quiz dashboard must render Results card');
     assert.ok(html.includes('Quiz History'), 'Quiz dashboard must render History card');
     assert.ok(html.includes('Switch to StudyVerse'), 'Quiz dashboard must render Switch to StudyVerse button');
     console.log('  ok  Route /quiz renders QuizDashboard with navigation cards and mode switcher');
   }
 
-  // 5. Verify Route: '/quiz/history' (Quiz History Placeholder)
+  // 5. Verify Route: '/quiz/history' (Quiz History Real View)
   {
     const html = renderToString(
       React.createElement(
@@ -171,17 +174,21 @@ async function run() {
           UIProvider,
           null,
           React.createElement(
-            MemoryRouter,
-            { initialEntries: ['/quiz/history'] },
-            React.createElement(QuizPlaceholder, { type: 'history' })
+            QuizProvider,
+            null,
+            React.createElement(
+              MemoryRouter,
+              { initialEntries: ['/quiz/history'] },
+              React.createElement(QuizHistory)
+            )
           )
         )
       )
     );
-    assert.ok(html.includes('Quiz History'), 'Quiz history must render title');
-    assert.ok(html.includes('Under Development'), 'Quiz history must indicate under development');
-    assert.ok(html.includes('Back to QuizVerse'), 'Quiz history must render back button');
-    console.log('  ok  Route /quiz/history renders QuizPlaceholder with "Quiz History" and roadmap info');
+    assert.ok(html.includes('Quiz History &amp; Library') || html.includes('Quiz History & Library'), 'Quiz history must render title');
+    assert.ok(html.includes('Practice Attempts'), 'Quiz history must render Practice Attempts tab');
+    assert.ok(html.includes('Back to Dashboard'), 'Quiz history must render back button');
+    console.log('  ok  Route /quiz/history renders QuizHistory with dual tabs and actions');
   }
 
   await server.close();

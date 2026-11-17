@@ -19,7 +19,10 @@ import Settings from './pages/Settings.jsx';
 import LandingPage from './pages/LandingPage.jsx';
 import NotFound from './pages/NotFound.jsx';
 import QuizDashboard from './quizverse/pages/QuizDashboard.jsx';
-import QuizPlaceholder from './quizverse/pages/QuizPlaceholder.jsx';
+import QuizCreate from './quizverse/pages/QuizCreate.jsx';
+import QuizPlay from './quizverse/pages/QuizPlay.jsx';
+import QuizResult from './quizverse/pages/QuizResult.jsx';
+import QuizHistory from './quizverse/pages/QuizHistory.jsx';
 import { QuizProvider } from './quizverse/state/QuizContext.jsx';
 
 const PAGES = {
@@ -233,7 +236,7 @@ function AppRoutes() {
             <AuthGate>
               {(user) => (
                 <QuizProvider key={`${user.mode}:${user.uid}`}>
-                  <QuizPlaceholder type="create" />
+                  <QuizCreate />
                 </QuizProvider>
               )}
             </AuthGate>
@@ -245,7 +248,7 @@ function AppRoutes() {
             <AuthGate>
               {(user) => (
                 <QuizProvider key={`${user.mode}:${user.uid}`}>
-                  <QuizPlaceholder type="play" />
+                  <QuizPlay />
                 </QuizProvider>
               )}
             </AuthGate>
@@ -257,7 +260,7 @@ function AppRoutes() {
             <AuthGate>
               {(user) => (
                 <QuizProvider key={`${user.mode}:${user.uid}`}>
-                  <QuizPlaceholder type="result" />
+                  <QuizResult />
                 </QuizProvider>
               )}
             </AuthGate>
@@ -269,7 +272,7 @@ function AppRoutes() {
             <AuthGate>
               {(user) => (
                 <QuizProvider key={`${user.mode}:${user.uid}`}>
-                  <QuizPlaceholder type="history" />
+                  <QuizHistory />
                 </QuizProvider>
               )}
             </AuthGate>
