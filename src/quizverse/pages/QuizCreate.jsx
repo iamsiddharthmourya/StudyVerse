@@ -52,6 +52,7 @@ export default function QuizCreate() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStep, setGenerationStep] = useState('');
   const [apiError, setApiError] = useState('');
+  const [apiDiagnostics, setApiDiagnostics] = useState(null);
   const [isSubmittingSample, setIsSubmittingSample] = useState(false);
 
   // Load daily quota on mount
@@ -131,6 +132,7 @@ export default function QuizCreate() {
   const handleGenerateClick = async (e) => {
     e.preventDefault();
     setApiError('');
+    setApiDiagnostics(null);
     const errors = {};
 
     if (sourceMode === 'topic') {
@@ -191,6 +193,7 @@ export default function QuizCreate() {
     } catch (err) {
       console.error('Quiz generation error:', err);
       setApiError(err.message || 'Failed to generate quiz. Please check your connection or try again.');
+      setApiDiagnostics(err.diagnostics || null);
 
       // Refresh quota if 429
       if (err.status === 429 || err.code === 'DAILY_QUOTA_EXCEEDED') {
@@ -207,6 +210,7 @@ export default function QuizCreate() {
   const handleCreateSampleQuiz = async (sampleIndex = 0) => {
     setIsSubmittingSample(true);
     setApiError('');
+    setApiDiagnostics(null);
     try {
       const sample = SAMPLE_QUIZZES[sampleIndex] || SAMPLE_QUIZZES[0];
       const customTitle = topic.trim()
@@ -299,11 +303,66 @@ export default function QuizCreate() {
         {/* API Error Alert */}
         {apiError && (
           <div className="card quota-alert-card error-card" role="alert">
-            <div className="quota-alert-head">
-              <AlertTriangle size={20} className="alert-icon-error" aria-hidden="true" />
-              <div>
-                <strong>Quiz Generation Notice</strong>
-                <p className="small">{apiError}</p>
+            <div className="quota-alert-head" style={{ alignItems: 'flex-start' }}>
+              <AlertTriangle size={22} className="alert-icon-error" aria-hidden="true" style={{ marginTop: '2px', flexShrink: 0 }} />
+              <div style={{ width: '100%' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
+                  <strong>
+                    {apiDiagnostics?.category ? 'Google AI Studio Quota Notice' : 'Quiz Generation Notice'}
+                  </strong>
+                  <span className="badge teal" style={{ fontSize: '0.75rem', padding: '2px 8px' }}>
+                    StudyVerse Daily Quota: {quota ? `${quota.remaining} / ${quota.limit} intact` : '5 / 5 intact'}
+                  </span>
+                </div>
+                <p className="small" style={{ lineHeight: '1.5', marginTop: '4px' }}>{apiError}</p>
+
+                {apiDiagnostics && (
+                  <div style={{ marginTop: '10px', padding: '10px 12px', background: 'rgba(0,0,0,0.2)', borderRadius: '6px', fontSize: '0.82rem' }}>
+                    <div style={{ marginBottom: '6px', color: 'var(--muted, #94a3b8)' }}>
+                      <strong>Diagnosis:</strong>{' '}
+                      {apiDiagnostics.category === 'LIMIT_ZERO_UNLINKED_BILLING'
+                        ? 'Google Cloud project quota is 0 (billing profile unlinked in Google Cloud Console).'
+                        : apiDiagnostics.category === 'REQUESTS_PER_DAY_EXCEEDED'
+                        ? 'Google free-tier daily requests limit (RPD) reached. Resets at midnight PT.'
+                        : apiDiagnostics.category === 'REQUESTS_PER_MINUTE_EXCEEDED'
+                        ? 'Google rate limit (15 requests/minute) momentarily reached. Please wait a moment.'
+                        : 'Google Generative Language API quota limit encountered.'}
+                    </div>
+                    {apiDiagnostics.consumerProject && apiDiagnostics.consumerProject !== 'N/A' && (
+                      <div style={{ color: 'var(--muted, #94a3b8)', marginBottom: '4px' }}>
+                        Google Consumer: <code>{apiDiagnostics.consumerProject}</code>
+                      </div>
+                    )}
+                    {Array.isArray(apiDiagnostics.troubleshooting) && apiDiagnostics.troubleshooting.length > 0 && (
+                      <ul style={{ margin: '6px 0 0 16px', padding: 0, color: 'var(--muted, #94a3b8)' }}>
+                        {apiDiagnostics.troubleshooting.slice(0, 3).map((item, idx) => (
+                          <li key={idx} style={{ marginBottom: '3px' }}>{item}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <div style={{ marginTop: '10px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn primary sm"
+                        onClick={() => handleCreateSampleQuiz(0)}
+                        disabled={isSubmittingSample}
+                      >
+                        ⚡ Practice with Pre-built Sample Quiz
+                      </button>
+                      {apiDiagnostics.helpUrl && (
+                        <a
+                          href={apiDiagnostics.helpUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="btn secondary sm"
+                          style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+                        >
+                          Check Google AI Studio Quotas ↗
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>

@@ -161,6 +161,7 @@ export async function generateQuizWithBackend(user, params, file) {
     error.code = data?.error || 'GENERATION_ERROR';
     error.quota = data?.quota || { remaining: data?.remaining };
     error.resetsAt = data?.resetsAt;
+    error.diagnostics = data?.diagnostics || null;
     throw error;
   }
 

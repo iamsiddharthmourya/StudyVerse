@@ -119,8 +119,9 @@ export default async function handler(req, res) {
 
       const statusCode = geminiErr.status || 502;
       return res.status(statusCode).json({
-        error: 'GEMINI_GENERATION_FAILED',
+        error: geminiErr.code || 'GEMINI_GENERATION_FAILED',
         message: geminiErr.message || 'Failed to generate quiz with Gemini AI.',
+        diagnostics: geminiErr.diagnostics || null,
         remaining: currentQuota.remaining,
         guestToken: auth.guestToken || undefined,
       });

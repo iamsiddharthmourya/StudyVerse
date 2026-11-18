@@ -21,6 +21,7 @@ import {
   discoverSupportedModels,
   resolveModelPlan,
   isTextGenerationModel,
+  parseGoogleErrorDiagnostics,
   _resetModelCacheForTesting,
 } from '../api/_lib/gemini.js';
 import { validateQuiz } from '../src/quizverse/services/quizValidation.js';
@@ -412,34 +413,88 @@ async function run() {
     assert.ok(!discovered.some((m) => m.id.includes('imagen')), 'Imagen models must be excluded');
     assert.ok(!discovered.some((m) => m.id === 'embedding-001'), 'Embedding models must be excluded');
 
-    // Test selection ranking: gemini-2.0-flash ranked above gemini-1.5-flash
+    // Test selection ranking: gemini-1.5-flash ranked above gemini-2.0-flash for stable free-tier availability
     const plan = await resolveModelPlan('mock_api_key_test', null);
-    assert.strictEqual(plan[0].model, 'gemini-2.0-flash');
+    assert.strictEqual(plan[0].model, 'gemini-1.5-flash');
     assert.strictEqual(plan[0].source, 'discovered_primary');
 
     // Test user-configured image model override rejected in favor of verified text model
     const planWithImageOverride = await resolveModelPlan('mock_api_key_test', 'gemini-2.5-flash-preview-image');
-    assert.strictEqual(planWithImageOverride[0].model, 'gemini-2.0-flash', 'Must ignore image model override and use text model');
+    assert.strictEqual(planWithImageOverride[0].model, 'gemini-1.5-flash', 'Must ignore image model override and use text model');
 
     // Test outdated/unsupported GEMINI_MODEL fallback:
     const planWithInvalidOverride = await resolveModelPlan('mock_api_key_test', 'deprecated-palm-2');
-    assert.strictEqual(planWithInvalidOverride[0].model, 'gemini-2.0-flash', 'Must fall back to active discovered model');
+    assert.strictEqual(planWithInvalidOverride[0].model, 'gemini-1.5-flash', 'Must fall back to active discovered model');
 
     // Restore
     global.fetch = originalFetch;
     _resetModelCacheForTesting();
-    console.log('  ok  Test 12: Dynamic models.list excludes image-preview models and selects text models');
+    console.log('  ok  Test 12: Dynamic models.list prioritizes stable text models and excludes preview-image');
   }
 
   // =========================================================================
-  // Test M: HTTP 429 Rate Limit / Quota Handling (No Retry Loops)
+  // Test M: parseGoogleErrorDiagnostics (Detects limit:0, RPD, RPM, project)
+  // =========================================================================
+  {
+    // Test 1: Limit 0 / Unlinked billing error
+    const limitZeroJson = {
+      error: {
+        code: 429,
+        message: 'Resource has been exhausted (e.g. check quota).',
+        status: 'RESOURCE_EXHAUSTED',
+        details: [
+          {
+            '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+            reason: 'RESOURCE_EXHAUSTED',
+            metadata: {
+              quota_limit_value: '0',
+              quota_metric: 'GenerateContent requests per minute per project per base_model',
+              consumer: 'projects/1071477169472',
+            },
+          },
+        ],
+      },
+    };
+
+    const diag1 = parseGoogleErrorDiagnostics(429, limitZeroJson, '', 'gemini-2.0-flash');
+    assert.strictEqual(diag1.category, 'LIMIT_ZERO_UNLINKED_BILLING');
+    assert.strictEqual(diag1.consumer, 'projects/1071477169472');
+    assert.strictEqual(diag1.quotaLimitValue, '0');
+    assert.match(diag1.explanation, /billing account/i);
+
+    // Test 2: Daily quota exhausted (RPD)
+    const rpdJson = {
+      error: {
+        code: 429,
+        message: 'Resource has been exhausted (e.g. check quota).',
+        details: [
+          {
+            '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+            metadata: {
+              quota_metric: 'GenerateContent requests per day per project per base_model',
+              consumer: 'projects/987654321',
+            },
+          },
+        ],
+      },
+    };
+
+    const diag2 = parseGoogleErrorDiagnostics(429, rpdJson, '', 'gemini-1.5-flash');
+    assert.strictEqual(diag2.category, 'REQUESTS_PER_DAY_EXCEEDED');
+    assert.match(diag2.explanation, /daily requests limit/i);
+
+    console.log('  ok  Test 13: parseGoogleErrorDiagnostics accurately identifies limit:0 and quota metrics');
+  }
+
+  // =========================================================================
+  // Test N: Model Fallback on 429 (Tries next text candidate if first has 429)
   // =========================================================================
   {
     _resetModelCacheForTesting();
     const originalFetch = global.fetch;
-    process.env.GEMINI_API_KEY = 'mock_key_for_429_test';
+    process.env.GEMINI_API_KEY = 'mock_key_for_fallback_test';
 
-    let generateCallCount = 0;
+    const attemptedCalls = [];
 
     global.fetch = async (url) => {
       if (url.includes('/models?')) {
@@ -449,11 +504,11 @@ async function run() {
           json: async () => ({
             models: [
               {
-                name: 'models/gemini-2.0-flash',
+                name: 'models/gemini-1.5-flash',
                 supportedGenerationMethods: ['generateContent'],
               },
               {
-                name: 'models/gemini-1.5-flash',
+                name: 'models/gemini-2.0-flash',
                 supportedGenerationMethods: ['generateContent'],
               },
             ],
@@ -462,15 +517,135 @@ async function run() {
       }
 
       if (url.includes(':generateContent')) {
-        generateCallCount++;
+        const modelMatch = url.match(/models\/([^:]+):generateContent/);
+        const modelName = modelMatch ? modelMatch[1] : 'unknown';
+        attemptedCalls.push(modelName);
+
+        // First model (gemini-1.5-flash) has 429 limit:0
+        if (modelName === 'gemini-1.5-flash') {
+          return {
+            ok: false,
+            status: 429,
+            json: async () => ({
+              error: {
+                code: 429,
+                message: 'Resource has been exhausted.',
+                details: [
+                  {
+                    '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+                    metadata: {
+                      quota_limit_value: '0',
+                      quota_metric: 'GenerateContent requests per minute per project per base_model',
+                      consumer: 'projects/1071477169472',
+                    },
+                  },
+                ],
+              },
+            }),
+          };
+        }
+
+        // Second model (gemini-2.0-flash) succeeds!
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        title: 'Fallback Biology Quiz',
+                        questions: [
+                          {
+                            question: 'What is ATP?',
+                            options: ['Energy molecule', 'Protein', 'Lipid', 'DNA'],
+                            correctIndex: 0,
+                            explanation: 'ATP provides energy for cells.',
+                          },
+                        ],
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        };
+      }
+
+      return originalFetch(url);
+    };
+
+    const quiz = await generateQuizWithGemini({
+      sourceType: 'topic',
+      topic: 'Cellular Energy',
+      questionCount: 1,
+    });
+
+    assert.ok(quiz);
+    assert.strictEqual(quiz.title, 'Fallback Biology Quiz');
+    assert.strictEqual(attemptedCalls.length, 2, 'Must try candidate 1, then fallback to candidate 2');
+    assert.strictEqual(attemptedCalls[0], 'gemini-1.5-flash');
+    assert.strictEqual(attemptedCalls[1], 'gemini-2.0-flash');
+
+    // Restore
+    global.fetch = originalFetch;
+    delete process.env.GEMINI_API_KEY;
+    _resetModelCacheForTesting();
+    console.log('  ok  Test 14: Model fallback successfully switches from 429 model to active text model');
+  }
+
+  // =========================================================================
+  // Test O: All Models Exhausted Quota Handling
+  // =========================================================================
+  {
+    _resetModelCacheForTesting();
+    const originalFetch = global.fetch;
+    process.env.GEMINI_API_KEY = 'mock_key_for_all_429_test';
+
+    let attemptedCount = 0;
+
+    global.fetch = async (url) => {
+      if (url.includes('/models?')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            models: [
+              {
+                name: 'models/gemini-1.5-flash',
+                supportedGenerationMethods: ['generateContent'],
+              },
+              {
+                name: 'models/gemini-2.0-flash',
+                supportedGenerationMethods: ['generateContent'],
+              },
+            ],
+          }),
+        };
+      }
+
+      if (url.includes(':generateContent')) {
+        attemptedCount++;
         return {
           ok: false,
           status: 429,
           json: async () => ({
             error: {
               code: 429,
-              message: 'Resource has been exhausted (e.g. check quota).',
-              status: 'RESOURCE_EXHAUSTED',
+              message: 'Resource has been exhausted.',
+              details: [
+                {
+                  '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+                  metadata: {
+                    quota_limit_value: '0',
+                    quota_metric: 'GenerateContent requests per minute per project per base_model',
+                    consumer: 'projects/1071477169472',
+                  },
+                },
+              ],
             },
           }),
         };
@@ -482,26 +657,28 @@ async function run() {
     try {
       await generateQuizWithGemini({
         sourceType: 'topic',
-        topic: 'Rate Limit Test',
+        topic: 'Rate Limit Exhaustion',
         questionCount: 5,
       });
-      assert.fail('Must throw on HTTP 429');
+      assert.fail('Must throw when all models fail');
     } catch (err) {
-      assert.strictEqual(err.status, 429, 'Must preserve HTTP 429 status');
-      assert.strictEqual(err.code, 'GEMINI_RATE_LIMIT');
-      assert.match(err.message, /rate limit or quota/i);
-      // Ensure Google's quota is respected: only 1 generateContent attempt made, no retry loops
-      assert.strictEqual(generateCallCount, 1, 'Must NOT cycle through other models on HTTP 429');
+      assert.strictEqual(err.status, 429);
+      assert.strictEqual(err.code, 'GOOGLE_AI_QUOTA_EXHAUSTED');
+      assert.ok(err.diagnostics, 'Must provide structured diagnostics');
+      assert.strictEqual(err.diagnostics.consumerProject, 'projects/1071477169472');
+      assert.strictEqual(err.diagnostics.category, 'LIMIT_ZERO_UNLINKED_BILLING');
+      assert.ok(Array.isArray(err.diagnostics.troubleshooting));
+      assert.strictEqual(attemptedCount, 2, 'Tried both verified text candidates before failing');
     }
 
     // Restore
     global.fetch = originalFetch;
     delete process.env.GEMINI_API_KEY;
     _resetModelCacheForTesting();
-    console.log('  ok  Test 13: HTTP 429 handled gracefully without bypassing Google quota');
+    console.log('  ok  Test 15: All-models quota exhaustion constructs structured diagnostics with project ID');
   }
 
-  console.log('\nAll 13 Phase 5 Gemini Backend & Quota Tests Passed Successfully!');
+  console.log('\nAll 15 Phase 5 Gemini Backend & Quota Tests Passed Successfully!');
 }
 
 run().catch((err) => {

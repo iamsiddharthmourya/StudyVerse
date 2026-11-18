@@ -264,6 +264,69 @@ async function run() {
     assert.strictEqual(docRes.body.quota.remaining, 3, 'Second successful generation leaves 3 quota');
     console.log('  ok  Test 5: POST /api/generate-quiz (Notes/Document-based) generates quiz from notes');
 
+    // Test 6: POST /api/generate-quiz on HTTP 429 quota exhaustion provides structured diagnostics & rolls back quota
+    global.fetch = async (url) => {
+      if (url.includes('generativelanguage.googleapis.com')) {
+        if (url.includes('/models?')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              models: [
+                {
+                  name: 'models/gemini-1.5-flash',
+                  supportedGenerationMethods: ['generateContent'],
+                },
+              ],
+            }),
+          };
+        }
+        return {
+          ok: false,
+          status: 429,
+          json: async () => ({
+            error: {
+              code: 429,
+              message: 'Resource has been exhausted.',
+              details: [
+                {
+                  '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+                  metadata: {
+                    quota_limit_value: '0',
+                    quota_metric: 'GenerateContent requests per minute per project per base_model',
+                    consumer: 'projects/1071477169472',
+                  },
+                },
+              ],
+            },
+          }),
+        };
+      }
+      return originalFetch(url);
+    };
+
+    const { req: q429Req, res: q429Res } = createMockReqRes({
+      method: 'POST',
+      url: '/api/generate-quiz',
+      headers: {
+        'content-type': 'application/json',
+        'x-guest-token': guestToken,
+      },
+      body: {
+        sourceType: 'topic',
+        topic: 'Quota 429 Test',
+      },
+    });
+
+    await generateQuizHandler(q429Req, q429Res);
+    assert.strictEqual(q429Res.statusCode, 429);
+    assert.strictEqual(q429Res.body.error, 'GOOGLE_AI_QUOTA_EXHAUSTED');
+    assert.ok(q429Res.body.diagnostics);
+    assert.strictEqual(q429Res.body.diagnostics.category, 'LIMIT_ZERO_UNLINKED_BILLING');
+    assert.strictEqual(q429Res.body.diagnostics.consumerProject, 'projects/1071477169472');
+    assert.strictEqual(q429Res.body.remaining, 3, 'Quota rolled back on 429; remains 3');
+    console.log('  ok  Test 6: POST /api/generate-quiz on HTTP 429 returns structured diagnostics & preserves quota');
+
     // Restore fetch
     global.fetch = originalFetch;
     delete process.env.GEMINI_API_KEY;
